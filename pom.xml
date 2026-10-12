@@ -15,7 +15,6 @@
     <artifactId>enigma.specification</artifactId>
     <version>1.0.0</version>
     <packaging>jar</packaging>
-    <name>enigma.specification</name>
 
     <properties>
         <lombok.version>1.18.42</lombok.version>
