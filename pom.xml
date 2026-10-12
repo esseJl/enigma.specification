@@ -11,9 +11,10 @@
         <relativePath/>
     </parent>
 
-    <artifactId>enigma.specification</artifactId>
     <groupId>ir.sinqro.enigma</groupId>
+    <artifactId>enigma.specification</artifactId>
     <version>1.0.0</version>
+    <packaging>jar</packaging>
     <name>enigma.specification</name>
 
     <properties>
@@ -87,7 +88,7 @@
         <repository>
             <id>github</id>
             <name>GitHub Packages</name>
-            <url>https://maven.pkg.github.com/esseJl/enigma.specification.git</url>
+            <url>https://maven.pkg.github.com/esseJl/enigma.specification</url>
         </repository>
     </distributionManagement>
 </project>
