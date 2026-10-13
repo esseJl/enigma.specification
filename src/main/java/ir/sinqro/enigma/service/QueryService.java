@@ -4,6 +4,9 @@ import ir.sinqro.enigma.annotation.DtoMapper;
 import ir.sinqro.enigma.exception.QueryRuleException;
 import ir.sinqro.enigma.model.*;
 import ir.sinqro.enigma.repository.GenericRepository;
+import ir.sinqro.enigma.specification.CollectionProjectionLoader;
+import ir.sinqro.enigma.specification.CollectionProjectionPlan;
+import ir.sinqro.enigma.specification.CollectionProjectionPlanner;
 import ir.sinqro.enigma.specification.DtoMapperHelper;
 import ir.sinqro.enigma.specification.JoinContext;
 import ir.sinqro.enigma.specification.SpecificationBuilder;
@@ -33,6 +36,10 @@ public abstract class QueryService<T, ID, D> {
     private SpecificationBuilder specBuilder;
     @Autowired
     private DtoMapperHelper dtoMapperHelper;
+    @Autowired
+    private CollectionProjectionPlanner collectionPlanner;
+    @Autowired
+    private CollectionProjectionLoader collectionLoader;
     @Autowired(required = false)
     private ResponseUtils responseUtils;
 
@@ -212,7 +219,19 @@ public abstract class QueryService<T, ID, D> {
         Root<T> root = cq.from(entityClass);
 
         List<FieldMeta> metas = specBuilder.getProjectionFieldMetas(dtoClass);
-        cq.multiselect(specBuilder.buildProjectionSelectionsWithAlias(root, dtoClass, joinCtx));
+        List<Selection<?>> selections = new ArrayList<>(
+                specBuilder.buildProjectionSelectionsWithAlias(root, dtoClass, joinCtx));
+
+        // @ProjectedCollection fields: select the owner id as one extra, trailing column
+        final CollectionProjectionPlan collectionPlan = collectionPlanner.planFor(dtoClass);
+        final int ownerIdColumn;
+        if (collectionPlan.hasCollections()) {
+            ownerIdColumn = selections.size();
+            selections.add(root.get(collectionLoader.requireIdAttribute(entityClass)).alias("__owner_id"));
+        } else {
+            ownerIdColumn = -1;
+        }
+        cq.multiselect(selections);
 
         Specification<T> clientSpec = null;
         if (clientFilter != null) {
@@ -260,9 +279,25 @@ public abstract class QueryService<T, ID, D> {
             total = executeCount(clientFilter, internalRequest, entityClass, dtoClass, joinCtx.hasCollectionJoin());
         }
 
-        List<X> content = tuples.stream()
-                .map(tuple -> dtoMapperHelper.mapTupleToDto(tuple, (Class<X>) dtoClass, metas))
-                .collect(Collectors.toList());
+        // One batched query per collection for the whole page, inside this read transaction,
+        // so lazy state is never touched after the session closes.
+        Map<Object, Map<String, Object>> loadedCollections = Map.of();
+        if (ownerIdColumn >= 0) {
+            List<Object> ownerIds = tuples.stream()
+                    .map(tuple -> tuple.get(ownerIdColumn))
+                    .filter(Objects::nonNull)
+                    .distinct()
+                    .collect(Collectors.toList());
+            loadedCollections = collectionLoader.load(collectionPlan, entityClass, ownerIds);
+        }
+
+        List<X> content = new ArrayList<>(tuples.size());
+        for (Tuple tuple : tuples) {
+            Map<String, Object> overrides = ownerIdColumn >= 0
+                    ? collectionLoader.valuesFor(collectionPlan, loadedCollections, tuple.get(ownerIdColumn))
+                    : Map.of();
+            content.add(dtoMapperHelper.mapTupleToDto(tuple, (Class<X>) dtoClass, metas, overrides));
+        }
 
         return new PageImpl<>(content, pageable, total);
     }

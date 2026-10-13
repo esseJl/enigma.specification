@@ -5,6 +5,7 @@ import ir.sinqro.enigma.model.FieldMeta;
 import jakarta.persistence.Tuple;
 import org.springframework.stereotype.Component;
 
+import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
@@ -19,9 +20,18 @@ public class DtoMapperHelper {
     private final ConcurrentHashMap<Class<?>, Constructor<?>> canonicalCtorCache = new ConcurrentHashMap<>();
 
     public <D> D mapTupleToDto(Tuple tuple, Class<D> dtoClass, List<FieldMeta> metas) {
+        return mapTupleToDto(tuple, dtoClass, metas, Map.of());
+    }
+
+    /**
+     * Same as {@link #mapTupleToDto(Tuple, Class, List)}, but {@code overrides} (DTO field name to
+     * value, e.g. already-loaded collections) take precedence over tuple columns.
+     */
+    public <D> D mapTupleToDto(Tuple tuple, Class<D> dtoClass, List<FieldMeta> metas,
+                               Map<String, Object> overrides) {
         if (dtoClass.isRecord()) {
             try {
-                return mapToRecord(tuple, dtoClass, metas);
+                return mapToRecord(tuple, dtoClass, metas, overrides);
             } catch (Exception e) {
                 throw new QueryRuleException(
                         "Failed to map Tuple to DTO record: " + dtoClass.getSimpleName()
@@ -61,7 +71,44 @@ public class DtoMapperHelper {
                                 + " to match. Cause: " + rootMessage(e), e);
             }
         }
+        for (Map.Entry<String, Object> override : overrides.entrySet()) {
+            try {
+                setFieldValue(instance, override.getKey(), override.getValue());
+            } catch (Exception e) {
+                throw new QueryRuleException(
+                        "Failed to map Tuple to DTO: " + dtoClass.getSimpleName()
+                                + ". Could not set projected collection '" + override.getKey()
+                                + "'. Cause: " + rootMessage(e), e);
+            }
+        }
         return instance;
+    }
+
+    /**
+     * Builds a DTO (record or mutable class) from values keyed by DTO field name. Missing record
+     * components become {@code null} (or the primitive default).
+     */
+    public <D> D instantiate(Class<D> dtoClass, Map<String, Object> valuesByField) {
+        try {
+            if (dtoClass.isRecord()) {
+                RecordComponent[] components = dtoClass.getRecordComponents();
+                Object[] args = new Object[components.length];
+                for (int i = 0; i < components.length; i++) {
+                    args[i] = valuesByField.get(components[i].getName());
+                }
+                return newRecord(dtoClass, components, args);
+            }
+            D instance = createInstance(dtoClass);
+            for (Map.Entry<String, Object> e : valuesByField.entrySet()) {
+                setFieldValue(instance, e.getKey(), e.getValue());
+            }
+            return instance;
+        } catch (QueryRuleException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new QueryRuleException("Failed to instantiate DTO " + dtoClass.getSimpleName()
+                    + ". Cause: " + rootMessage(e), e);
+        }
     }
 
     private static String rootMessage(Throwable t) {
@@ -117,7 +164,8 @@ public class DtoMapperHelper {
     }
 
     @SuppressWarnings("unchecked")
-    private <D> D mapToRecord(Tuple tuple, Class<D> dtoClass, List<FieldMeta> metas) throws Exception {
+    private <D> D mapToRecord(Tuple tuple, Class<D> dtoClass, List<FieldMeta> metas,
+                              Map<String, Object> overrides) throws Exception {
         RecordComponent[] components = dtoClass.getRecordComponents();
         Object[] args = new Object[components.length];
 
@@ -149,6 +197,20 @@ public class DtoMapperHelper {
                 }
             }
             args[i] = idx != null ? tuple.get(idx) : null;
+            if (overrides.containsKey(name)) {
+                args[i] = overrides.get(name);
+            }
+        }
+
+        return newRecord(dtoClass, components, args);
+    }
+
+    @SuppressWarnings("unchecked")
+    private <D> D newRecord(Class<D> dtoClass, RecordComponent[] components, Object[] args) throws Exception {
+        for (int i = 0; i < args.length; i++) {
+            if (args[i] == null && components[i].getType().isPrimitive()) {
+                args[i] = Array.get(Array.newInstance(components[i].getType(), 1), 0);
+            }
         }
 
         Constructor<D> ctor = (Constructor<D>) canonicalCtorCache.computeIfAbsent(dtoClass, cls -> {

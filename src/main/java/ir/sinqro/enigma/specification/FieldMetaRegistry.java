@@ -5,7 +5,6 @@ import ir.sinqro.enigma.annotation.DisableSpecificationQuery;
 import ir.sinqro.enigma.annotation.DtoMapper;
 import ir.sinqro.enigma.annotation.Mapper;
 import ir.sinqro.enigma.model.FieldMeta;
-import org.springframework.stereotype.Component;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
@@ -37,7 +36,7 @@ public class FieldMetaRegistry {
             Map<String, FieldMeta> canonical = new LinkedHashMap<>();
             Map<String, FieldMeta> shortAliases = new LinkedHashMap<>();
             Set<String> ambiguousShortNames = new HashSet<>();
-            collectFields(cls, "", canonical, shortAliases, entityClass, Set.of(), ambiguousShortNames, false);
+            collectFields(cls, "", "", canonical, shortAliases, entityClass, Set.of(), ambiguousShortNames, false);
 
             Map<String, FieldMeta> map = new LinkedHashMap<>(canonical);
             for (Map.Entry<String, FieldMeta> e : shortAliases.entrySet()) {
@@ -140,6 +139,7 @@ public class FieldMetaRegistry {
     private void collectFields(
             Class<?> clazz,
             String prefix,
+            String parentEntityPath,
             Map<String, FieldMeta> canonical,
             Map<String, FieldMeta> shortAliases,
             Class<?> entityClass,
@@ -154,7 +154,7 @@ public class FieldMetaRegistry {
         Set<Class<?>> pathVisited = new HashSet<>(visited);
         pathVisited.add(clazz);
 
-        collectFields(clazz.getSuperclass(), prefix, canonical, shortAliases, entityClass, pathVisited, ambiguousShortNames, underCollection);
+        collectFields(clazz.getSuperclass(), prefix, parentEntityPath, canonical, shortAliases, entityClass, pathVisited, ambiguousShortNames, underCollection);
 
         for (Field f : clazz.getDeclaredFields()) {
             if (Modifier.isStatic(f.getModifiers()) || f.isSynthetic()) {
@@ -164,9 +164,15 @@ public class FieldMetaRegistry {
             String dtoName = prefix.isEmpty() ? f.getName() : prefix + "." + f.getName();
 
             Mapper mapper = f.getAnnotation(Mapper.class);
-            String entityPath = (mapper != null && mapper.value() != null && !mapper.value().isBlank())
-                    ? mapper.value()
-                    : dtoName;
+            boolean hasMapper = mapper != null && mapper.value() != null && !mapper.value().isBlank();
+            String entityPath;
+            if (underCollection && !parentEntityPath.isEmpty()) {
+                // Inside a collection element: paths are relative to the element entity, so that
+                // filter/sort on "roles.name" resolves to e.g. "userRoles.role.name".
+                entityPath = parentEntityPath + "." + (hasMapper ? mapper.value().trim() : f.getName());
+            } else {
+                entityPath = hasMapper ? mapper.value() : dtoName;
+            }
 
 
             DisableSpecificationQuery disable = f.getAnnotation(DisableSpecificationQuery.class);
@@ -195,7 +201,7 @@ public class FieldMetaRegistry {
 
             Class<?> recurseType = fieldIsCollection ? resolveNextType(f) : f.getType();
             if (isComplexType(recurseType)) {
-                collectFields(recurseType, dtoName, canonical, shortAliases, entityClass, pathVisited, ambiguousShortNames, isUnderCollection);
+                collectFields(recurseType, dtoName, entityPath, canonical, shortAliases, entityClass, pathVisited, ambiguousShortNames, isUnderCollection);
             }
         }
     }

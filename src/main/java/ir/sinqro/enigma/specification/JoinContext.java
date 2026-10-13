@@ -71,6 +71,49 @@ public final class JoinContext {
         return current;
     }
 
+    /**
+     * Joins <em>every</em> segment of {@code entityPath} (including the last) and returns the
+     * resulting {@link From}. Used to reach a to-many association or an element collection.
+     * <p>
+     * Not thread-safe, like the rest of this class: one instance per query, per calling thread.
+     * Do not mix {@code resolve} (LEFT) and {@code resolveFrom} on the same instance for
+     * overlapping prefixes - joins are cached by path regardless of join type.
+     */
+    public From<?, ?> resolveFrom(From<?, ?> root, String entityPath, JoinType joinType) {
+        Objects.requireNonNull(root, "root must not be null");
+        Objects.requireNonNull(joinType, "joinType must not be null");
+        if (entityPath == null || entityPath.isBlank()) {
+            throw new IllegalArgumentException("entityPath must not be blank");
+        }
+        String[] parts = entityPath.split("\\.");
+        From<?, ?> current = root;
+        StringBuilder pathKey = new StringBuilder();
+        for (String part : parts) {
+            if (part == null || part.isBlank()) {
+                throw new IllegalArgumentException("Empty path segment in: '" + entityPath + "'");
+            }
+            if (!pathKey.isEmpty()) {
+                pathKey.append('.');
+            }
+            pathKey.append(part);
+            String key = pathKey.toString();
+            From<?, ?> existing = joins.get(key);
+            if (existing != null) {
+                current = existing;
+                continue;
+            }
+            if (joins.size() >= maxJoins) {
+                throw new QueryRuleException(
+                        "Query exceeds maximum allowed number of joins per query: " + maxJoins);
+            }
+            Join<?, ?> join = current.join(part, joinType);
+            markIfCollection(join);
+            joins.put(key, join);
+            current = join;
+        }
+        return current;
+    }
+
     private void markIfCollection(Join<?, ?> join) {
         try {
             Attribute<?, ?> attr = join.getAttribute();

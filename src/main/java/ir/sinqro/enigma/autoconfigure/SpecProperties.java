@@ -21,6 +21,10 @@ public class SpecProperties {
         private int maxFilterNodes = 1000;
         private int maxJoins = 30;
         private int maxInSize = 500;
+        /** Max parent ids per IN-list when loading @ProjectedCollection fields (Oracle caps IN at 1000). */
+        private int collectionBatchSize = 500;
+        /** Max child rows read for @ProjectedCollection fields per request; exceeding it fails the request. */
+        private int maxCollectionRows = 10_000;
 
         public int getMaxFilterDepth() { return maxFilterDepth; }
         public void setMaxFilterDepth(int maxFilterDepth) { this.maxFilterDepth = maxFilterDepth; }
@@ -33,6 +37,12 @@ public class SpecProperties {
 
         public int getMaxJoins() { return maxJoins; }
         public void setMaxJoins(int maxJoins) { this.maxJoins = maxJoins; }
+
+        public int getCollectionBatchSize() { return collectionBatchSize; }
+        public void setCollectionBatchSize(int collectionBatchSize) { this.collectionBatchSize = collectionBatchSize; }
+
+        public int getMaxCollectionRows() { return maxCollectionRows; }
+        public void setMaxCollectionRows(int maxCollectionRows) { this.maxCollectionRows = maxCollectionRows; }
 
         public int getMaxInSize() { return maxInSize; }
         public void setMaxInSize(int maxInSize) { this.maxInSize = maxInSize; }

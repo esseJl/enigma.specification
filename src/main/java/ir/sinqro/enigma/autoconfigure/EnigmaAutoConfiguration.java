@@ -52,6 +52,23 @@ public class EnigmaAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
+    public CollectionProjectionPlanner collectionProjectionPlanner() {
+        return new CollectionProjectionPlanner();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public CollectionProjectionLoader collectionProjectionLoader(EntityManager entityManager,
+                                                                 ConversionService conversionService,
+                                                                 DtoMapperHelper dtoMapperHelper,
+                                                                 SpecProperties properties) {
+        SpecProperties.Spec spec = properties.getSpec();
+        return new CollectionProjectionLoader(entityManager, conversionService, dtoMapperHelper,
+                spec.getMaxJoins(), spec.getCollectionBatchSize(), spec.getMaxCollectionRows());
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
     public SpecificationBuilder specificationBuilder(FieldMetaRegistry fieldMetaRegistry,
                                                      ValueConverter valueConverter,
                                                      PathResolver pathResolver,
