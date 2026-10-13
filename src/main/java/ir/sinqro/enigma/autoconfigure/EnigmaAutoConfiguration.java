@@ -1,9 +1,6 @@
 package ir.sinqro.enigma.autoconfigure;
 
-import ir.sinqro.enigma.specification.FieldMetaRegistry;
-import ir.sinqro.enigma.specification.PathResolver;
-import ir.sinqro.enigma.specification.SpecificationBuilder;
-import ir.sinqro.enigma.specification.ValueConverter;
+import ir.sinqro.enigma.specification.*;
 import jakarta.persistence.EntityManager;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
@@ -45,6 +42,12 @@ public class EnigmaAutoConfiguration {
     @ConditionalOnMissingBean
     public PathResolver pathResolver(FieldMetaRegistry fieldMetaRegistry) {
         return new PathResolver(fieldMetaRegistry);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public DtoMapperHelper dtoMapperHelper() {
+        return new DtoMapperHelper();
     }
 
     @Bean
