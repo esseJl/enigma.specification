@@ -226,8 +226,21 @@ public abstract class QueryService<T, ID, D> {
         final CollectionProjectionPlan collectionPlan = collectionPlanner.planFor(dtoClass);
         final int ownerIdColumn;
         if (collectionPlan.hasCollections()) {
-            ownerIdColumn = selections.size();
-            selections.add(root.get(collectionLoader.requireIdAttribute(entityClass)).alias("__owner_id"));
+            String idAttr = collectionLoader.requireIdAttribute(entityClass);
+            int existingIdColumn = -1;
+            for (int i = 0; i < metas.size(); i++) {
+                if (idAttr.equals(metas.get(i).entityPath())) {
+                    existingIdColumn = i;
+                    break;
+                }
+            }
+            if (existingIdColumn >= 0) {
+                // The id is already projected by the DTO: reuse that column.
+                ownerIdColumn = existingIdColumn;
+            } else {
+                ownerIdColumn = selections.size();
+                selections.add(root.get(idAttr));
+            }
         } else {
             ownerIdColumn = -1;
         }

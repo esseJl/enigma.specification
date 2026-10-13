@@ -110,10 +110,12 @@ public class SpecificationBuilder {
                             + (dtoOrEntity != null ? dtoOrEntity.getSimpleName() : "null")
                             + ". Check @DtoMapper / @Mapper / @DisableSpecificationQuery configuration.");
         }
+        // No aliases on purpose: Criteria Path instances are cached and alias() mutates them in place,
+        // so aliasing causes "duplicate alias" errors when two columns resolve to the same path.
+        // Tuples are always read by index.
         List<Selection<?>> selections = new ArrayList<>(metas.size());
-        for (int i = 0; i < metas.size(); i++) {
-            Path<?> path = resolvePathWithJoin(root, metas.get(i).entityPath(), joinCtx);
-            selections.add(path.alias("c" + i));
+        for (FieldMeta meta : metas) {
+            selections.add(resolvePathWithJoin(root, meta.entityPath(), joinCtx));
         }
         return selections;
     }
