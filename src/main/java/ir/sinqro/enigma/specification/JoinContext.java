@@ -12,11 +12,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 
-/**
- * Shared context for a single CriteriaQuery.
- * Must be created per-query (never singleton/shared).
- * Not thread-safe (lifecycle = one query).
- */
+
 public final class JoinContext {
 
     private final Map<String, From<?, ?>> joins = new HashMap<>();

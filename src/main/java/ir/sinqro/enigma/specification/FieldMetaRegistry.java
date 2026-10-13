@@ -16,7 +16,6 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 
-@Component
 public class FieldMetaRegistry {
 
     private final Map<Class<?>, Map<String, FieldMeta>> cache = new ConcurrentHashMap<>();

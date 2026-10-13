@@ -24,7 +24,6 @@ import java.util.Objects;
 import java.util.stream.Collectors;
 
 
-@Component
 public class ValueConverter {
 
     private static final List<DateTimeFormatter> LOCAL_DATE_TIME_FORMATTERS = List.of(
@@ -65,12 +64,10 @@ public class ValueConverter {
     }
 
 
-    public ValueConverter(ConversionService conversionService,
-                          @Value("${enigma.timezone:UTC}") String zoneIdStr,
-                          @Value("${enigma.spec.max-in-size:500}") int maxInSize) {
+    public ValueConverter(ConversionService conversionService, ZoneId zoneId, int maxInSize) {
         this.conversionService = Objects.requireNonNull(conversionService,
                 "ConversionService must not be null");
-        this.zoneId = ZoneId.of(zoneIdStr);
+        this.zoneId = Objects.requireNonNull(zoneId, "zoneId must not be null");
         this.maxInSize = maxInSize > 0 ? maxInSize : 500;
     }
 

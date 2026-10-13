@@ -13,7 +13,6 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 
-@Component
 public class DtoMapperHelper {
 
     private final ConcurrentHashMap<Class<?>, ConcurrentHashMap<String, Field>> fieldCache = new ConcurrentHashMap<>();

@@ -54,7 +54,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 })
 public class PersonSpecificationFullTest {
 
-    // ─── Config ایزوله (جایگزین TradeJournalApplication) ───
     @SpringBootConfiguration
     @EnableAutoConfiguration
     @org.springframework.boot.persistence.autoconfigure.EntityScan(basePackageClasses = {
@@ -63,20 +62,15 @@ public class PersonSpecificationFullTest {
     })
     @EnableJpaRepositories(basePackageClasses = PersonRepository.class, considerNestedRepositories = true)
     @Import({
-            SpecificationBuilder.class,
-            FieldMetaRegistry.class,
-            ValueConverter.class,
-            PathResolver.class,
+            ir.sinqro.enigma.autoconfigure.EnigmaAutoConfiguration.class,
             DtoMapperHelper.class,
             PersonQueryService.class
     })
     static class TestConfig {
 
-        // اگر ResponseUtils لازم است و bean ندارد:
         @Bean
         ir.sinqro.enigma.utils.response.ResponseUtils responseUtils() {
             return new ir.sinqro.enigma.utils.response.ResponseUtilsImp();
-            // یا یک mock ساده اگر constructor پیچیده دارد
         }
 
         @Bean

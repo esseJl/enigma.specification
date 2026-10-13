@@ -9,7 +9,6 @@ import jakarta.persistence.criteria.Root;
 import org.springframework.stereotype.Component;
 
 
-@Component
 public class PathResolver {
 
     private final FieldMetaRegistry fieldMetaRegistry;

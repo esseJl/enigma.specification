@@ -13,7 +13,6 @@ import java.util.Locale;
 import java.util.Objects;
 
 
-@Component
 public class SpecificationBuilder {
 
     private final FieldMetaRegistry fieldMetaRegistry;

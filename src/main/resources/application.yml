@@ -1,0 +1,8 @@
+app.specification:
+  timezone: Asia/Tehran
+  spec:
+    max-filter-depth: 32
+    max-sort-fields: 20
+    max-filter-nodes: 1000
+    max-joins: 30
+    max-in-size: 500
