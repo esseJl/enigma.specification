@@ -134,6 +134,52 @@ class CollectionProjectionIT {
     }
 
     @Test
+    void filterOnElementCollectionMatchesIndividualElements() {
+        assertThat(names(Filters.eq("assignments.perms", "WRITE"))).containsExactly("o1");
+        assertThat(names(Filters.eq("assignments.perms", "DELETE"))).containsExactly("o3");
+        assertThat(names(Filters.in("assignments.perms", "WRITE", "DELETE"))).containsExactlyInAnyOrder("o1", "o3");
+        assertThat(names(Filters.eq("assignments.perms", "READ"))).containsExactly("o1");
+    }
+
+    @Test
+    void elementCollectionFilterIsEvaluatedOnTheSameRowAsItsSiblings() {
+        // o1: alpha[READ], beta[READ, WRITE] -> WRITE exists, but not on the "alpha" assignment
+        assertThat(names(Filters.and(Filters.eq("assignments.labelName", "alpha"), Filters.eq("assignments.perms", "WRITE"))))
+                .isEmpty();
+        assertThat(names(Filters.and(Filters.eq("assignments.labelName", "beta"), Filters.eq("assignments.perms", "WRITE"))))
+                .containsExactly("o1");
+        assertThat(names(Filters.and(Filters.eq("assignments.labelName", "beta"), Filters.eq("assignments.perms", "DELETE"))))
+                .containsExactly("o3");
+    }
+
+    @Test
+    void elementCollectionFilterCountsEachOwnerOnceAndKeepsAllItsElements() {
+        // o1 matches READ through two different assignments: still one owner, one count, full collections returned.
+        var page = service.query(new QueryRequest(Filters.eq("assignments.perms", "READ"),
+                List.of(SortRequest.asc("name")), new PageRequest(0, 1)));
+        assertThat(page.count()).isEqualTo(1);
+        assertThat(page.result()).extracting(OwnerDto::name).containsExactly("o1");
+        assertThat(page.result().get(0).assignments()).hasSize(2);
+        assertThat(page.result().get(0).assignments().get(1).perms()).containsExactlyInAnyOrder("READ", "WRITE");
+    }
+
+    @Test
+    void elementCollectionNullChecksUseTheJoinedElements() {
+        // LEFT join: owners without any assignment (o2) or with an assignment holding no permission (o4)
+        assertThat(names(Filters.isNull("assignments.perms"))).containsExactlyInAnyOrder("o2", "o4");
+        assertThat(names(Filters.isNotNull("assignments.perms"))).containsExactlyInAnyOrder("o1", "o3");
+    }
+
+    @Test
+    void elementCollectionFilterRejectsValuesOfTheWrongType() {
+        assertThatThrownBy(() -> service.query(QueryRequest.of(Filters.eq("assignments.perms", "NOT_A_PERM"))))
+                .isInstanceOf(QueryRuleException.class)
+                .hasMessageContaining("assignments.perms");
+        assertThatThrownBy(() -> service.query(QueryRequest.of(Filters.contains("assignments.perms", "RE"))))
+                .isInstanceOf(QueryRuleException.class);
+    }
+
+    @Test
     void failsClosedWhenChildRowBudgetIsExceeded() {
         for (int i = 0; i < 15; i++) {
             owner("bulk" + i, assignment(label("l" + i), Perm.READ));
@@ -146,6 +192,10 @@ class CollectionProjectionIT {
     }
 
     // ---- helpers
+    private List<String> names(FilterNode filter) {
+        return service.query(QueryRequest.of(filter)).result().stream().map(OwnerDto::name).toList();
+    }
+
     private Label label(String name) { Label l = new Label(); l.name = name; em.persist(l); return l; }
 
     private Assignment assignment(Label label, Perm... perms) {

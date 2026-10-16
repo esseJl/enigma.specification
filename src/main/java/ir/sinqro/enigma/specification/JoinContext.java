@@ -76,8 +76,9 @@ public final class JoinContext {
      * resulting {@link From}. Used to reach a to-many association or an element collection.
      * <p>
      * Not thread-safe, like the rest of this class: one instance per query, per calling thread.
-     * Do not mix {@code resolve} (LEFT) and {@code resolveFrom} on the same instance for
-     * overlapping prefixes - joins are cached by path regardless of join type.
+     * Joins are cached by path regardless of join type, so on overlapping prefixes use
+     * {@link JoinType#LEFT} (what {@link #resolve} uses); only then can the two be mixed safely
+     * on the same instance.
      */
     public From<?, ?> resolveFrom(From<?, ?> root, String entityPath, JoinType joinType) {
         Objects.requireNonNull(root, "root must not be null");
