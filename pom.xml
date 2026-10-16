@@ -13,7 +13,7 @@
 
     <groupId>ir.sinqro.enigma</groupId>
     <artifactId>enigma.specification</artifactId>
-    <version>1.1.5</version>
+    <version>1.2.0</version>
     <packaging>jar</packaging>
 
     <properties>

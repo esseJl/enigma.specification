@@ -18,7 +18,6 @@ import java.time.ZoneId;
 @EnableConfigurationProperties(SpecProperties.class)
 public class EnigmaAutoConfiguration {
 
-
     @Bean
     @ConditionalOnMissingBean
     public ConversionService conversionService() {
@@ -40,8 +39,8 @@ public class EnigmaAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    public PathResolver pathResolver(FieldMetaRegistry fieldMetaRegistry) {
-        return new PathResolver(fieldMetaRegistry);
+    public PathResolver pathResolver(FieldMetaRegistry fieldMetaRegistry,EntityManager entityManager) {
+        return new PathResolver(fieldMetaRegistry,entityManager);
     }
 
     @Bean
