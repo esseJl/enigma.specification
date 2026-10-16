@@ -15,6 +15,7 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.ClassUtils;
 
+import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -163,7 +164,7 @@ public class CollectionProjectionLoader {
             Expression<?> value = resolveLeaf(pathCtx, root, plan.path());
             selections.add(value);
             orders.add(cb.asc(value));
-            for (Tuple row : execute(cq, root, ownerIdPath, ownerIds, selections, orders, budget, plan)) {
+            for (Tuple row : execute(cq, root, ownerIdPath, ownerIds, selections, orders, budget, plan, null)) {
                 Object converted = coerce(row.get(1), scalar.type(), plan.dtoField());
                 if (converted != null) {
                     out.computeIfAbsent(row.get(0), k -> new ArrayList<>()).add(converted);
@@ -204,7 +205,14 @@ public class CollectionProjectionLoader {
                     + "' must not traverse another collection; declare it as a nested @ProjectedCollection");
         }
 
-        List<Tuple> rows = execute(cq, root, ownerIdPath, ownerIds, selections, orders, budget, plan);
+        // Optional "active only" filter on the element: disableDate IS NULL OR disableDate > now
+        Predicate activePredicate = null;
+        if (!plan.activeField().isBlank()) {
+            Path<LocalDateTime> disableDate = resolveActiveField(elCtx, el, plan);
+            activePredicate = cb.or(cb.isNull(disableDate), cb.greaterThan(disableDate, LocalDateTime.now()));
+        }
+
+        List<Tuple> rows = execute(cq, root, ownerIdPath, ownerIds, selections, orders, budget, plan, activePredicate);
 
         // Nested collections: one batched fetch per nested collection for all elements of this chunk.
         List<Map<Object, Object>> nestedResults = new ArrayList<>(element.nested().size());
@@ -238,9 +246,15 @@ public class CollectionProjectionLoader {
 
     private List<Tuple> execute(CriteriaQuery<Tuple> cq, Root<?> root, Path<Object> ownerIdPath,
                                 List<Object> ownerIds, List<Selection<?>> selections,
-                                List<Order> orders, RowBudget budget, CollectionPlan plan) {
+                                List<Order> orders, RowBudget budget, CollectionPlan plan,
+                                Predicate extraPredicate) {
+        CriteriaBuilder cb = em.getCriteriaBuilder();
         cq.multiselect(selections);
-        cq.where(ownerIdPath.in(ownerIds));
+        Predicate where = ownerIdPath.in(ownerIds);
+        if (extraPredicate != null) {
+            where = cb.and(where, extraPredicate);
+        }
+        cq.where(where);
         cq.orderBy(orders);
         TypedQuery<Tuple> query = em.createQuery(cq);
         query.setMaxResults(budget.fetchLimit()); // remaining + 1, to detect overflow without reading it all
@@ -279,6 +293,16 @@ public class CollectionProjectionLoader {
             throw new QueryRuleException("Invalid path '" + path + "' in collection '"
                     + plan.dtoField() + "': " + ex.getMessage(), ex);
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Path<LocalDateTime> resolveActiveField(JoinContext elCtx, From<?, ?> el, CollectionPlan plan) {
+        Path<?> path = resolveRelative(elCtx, el, plan.activeField(), plan);
+        if (!LocalDateTime.class.isAssignableFrom(path.getJavaType())) {
+            throw new QueryRuleException("activeField '" + plan.activeField() + "' of collection '"
+                    + plan.dtoField() + "' must be a LocalDateTime but is " + path.getJavaType().getSimpleName());
+        }
+        return (Path<LocalDateTime>) path;
     }
 
     private Attribute<?, ?> attribute(Class<?> type, String name) {

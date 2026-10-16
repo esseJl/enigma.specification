@@ -26,4 +26,11 @@ public @interface ProjectedCollection {
      * (or by value for simple element types). Ignored for simple element types.
      */
     String orderBy() default "";
+
+    /**
+     * Path (relative to the element entity) of a nullable date-time "disable date" column.
+     * When set, only active elements are loaded: {@code field IS NULL OR field > now}.
+     * Not supported for simple element types. Empty = no filtering.
+     */
+    String activeField() default "";
 }

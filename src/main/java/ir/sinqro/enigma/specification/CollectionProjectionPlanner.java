@@ -61,7 +61,10 @@ public class CollectionProjectionPlanner {
             if (!ann.orderBy().isBlank()) {
                 throw new QueryRuleException("orderBy is not supported for simple element type at " + where);
             }
-            return new CollectionPlan(f.getName(), path, kind, "", new ScalarElement(elementType));
+            if (!ann.activeField().isBlank()) {
+                throw new QueryRuleException("activeField is not supported for simple element type at " + where);
+            }
+            return new CollectionPlan(f.getName(), path, kind, "", "", new ScalarElement(elementType));
         }
 
         if (visited.contains(elementType)) {
@@ -92,7 +95,7 @@ public class CollectionProjectionPlanner {
                     + " has no mappable fields (" + where + ")");
         }
         return new CollectionPlan(f.getName(), path, kind, ann.orderBy().trim(),
-                new DtoElement(elementType, scalars, nested));
+                ann.activeField().trim(), new DtoElement(elementType, scalars, nested));
     }
 
     private static String pathOf(Field f) {

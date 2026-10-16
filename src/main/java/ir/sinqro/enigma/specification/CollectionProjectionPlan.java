@@ -32,7 +32,7 @@ public final class CollectionProjectionPlan {
 
     /** One collection field. {@code path} is relative to the owning entity. */
     public record CollectionPlan(String dtoField, String path, ContainerKind container,
-                                 String orderBy, ElementPlan element) {
+                                 String orderBy, String activeField, ElementPlan element) {
     }
 
     public sealed interface ElementPlan permits ScalarElement, DtoElement {
