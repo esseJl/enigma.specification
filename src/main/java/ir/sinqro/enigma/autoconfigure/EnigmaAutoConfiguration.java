@@ -63,7 +63,8 @@ public class EnigmaAutoConfiguration {
                                                                  SpecProperties properties) {
         SpecProperties.Spec spec = properties.getSpec();
         return new CollectionProjectionLoader(entityManager, conversionService, dtoMapperHelper,
-                spec.getMaxJoins(), spec.getCollectionBatchSize(), spec.getMaxCollectionRows());
+                spec.getMaxJoins(), spec.getCollectionBatchSize(), spec.getMaxCollectionRows(),
+                spec.getMaxCollectionDepth(), spec.getMaxCollectionElements());
     }
 
     @Bean

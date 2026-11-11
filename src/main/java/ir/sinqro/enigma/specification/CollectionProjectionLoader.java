@@ -25,7 +25,15 @@ import java.util.concurrent.ConcurrentMap;
  *
  * <h3>Strategy</h3>
  * One query per collection per chunk of parent ids ({@code WHERE owner.id IN (...)}), never one
- * per parent row. Nested collections recurse using the element ids of the previous level.
+ * per parent row. Nested collections are loaded breadth-first using the element ids of the
+ * previous level. Self-referencing / mutually recursive DTOs (see {@link CollectionProjectionPlanner})
+ * are loaded one query per tree level, each (collection, owner) at most once per request, so
+ * loading terminates even on cyclic data. Traversal, cycle handling and limits live in
+ * {@link CollectionGraphAssembler}; this class only builds and runs the JPA queries.
+ *
+ * <h3>Limits (fail closed)</h3>
+ * {@code maxRows} child rows read, {@code maxDepth} nested levels holding elements and
+ * {@code maxElements} element DTOs produced, per request.
  *
  * <h3>Concurrency</h3>
  * <ul>
@@ -52,6 +60,13 @@ public class CollectionProjectionLoader {
     private final int maxJoins;
     private final int batchSize;
     private final int maxRows;
+    private final int maxDepth;
+    private final int maxElements;
+
+    public static final int DEFAULT_MAX_DEPTH = 32;
+    public static final int DEFAULT_MAX_ELEMENTS = 50_000;
+    private static final int MAX_DEPTH_UPPER_BOUND = 1_000;
+    private static final int MAX_ELEMENTS_UPPER_BOUND = 10_000_000;
 
     private final ConcurrentMap<Class<?>, Optional<String>> idAttributeCache = new ConcurrentHashMap<>();
 
@@ -61,6 +76,18 @@ public class CollectionProjectionLoader {
                                       int maxJoins,
                                       int batchSize,
                                       int maxRows) {
+        this(em, conversionService, dtoMapperHelper, maxJoins, batchSize, maxRows,
+                DEFAULT_MAX_DEPTH, DEFAULT_MAX_ELEMENTS);
+    }
+
+    public CollectionProjectionLoader(EntityManager em,
+                                      ConversionService conversionService,
+                                      DtoMapperHelper dtoMapperHelper,
+                                      int maxJoins,
+                                      int batchSize,
+                                      int maxRows,
+                                      int maxDepth,
+                                      int maxElements) {
         this.em = Objects.requireNonNull(em, "em");
         this.conversionService = Objects.requireNonNull(conversionService, "conversionService");
         this.dtoMapperHelper = Objects.requireNonNull(dtoMapperHelper, "dtoMapperHelper");
@@ -76,6 +103,14 @@ public class CollectionProjectionLoader {
         this.maxJoins = maxJoins;
         this.batchSize = batchSize;
         this.maxRows = maxRows;
+        if (maxDepth <= 0 || maxDepth > MAX_DEPTH_UPPER_BOUND) {
+            throw new IllegalArgumentException("maxCollectionDepth must be in 1.." + MAX_DEPTH_UPPER_BOUND);
+        }
+        if (maxElements <= 0 || maxElements > MAX_ELEMENTS_UPPER_BOUND) {
+            throw new IllegalArgumentException("maxCollectionElements must be in 1.." + MAX_ELEMENTS_UPPER_BOUND);
+        }
+        this.maxDepth = maxDepth;
+        this.maxElements = maxElements;
     }
 
     // ------------------------------------------------------------------ public API
@@ -99,15 +134,13 @@ public class CollectionProjectionLoader {
         if (!plan.hasCollections() || ownerIds.isEmpty()) {
             return Map.of();
         }
+        requireIdAttribute(ownerEntity);
         RowBudget budget = new RowBudget(maxRows);
-        Map<Object, Map<String, Object>> result = new HashMap<>();
-        for (CollectionPlan cp : plan.collections()) {
-            Map<Object, Object> perOwner = fetch(cp, ownerEntity, ownerIds, budget);
-            for (Map.Entry<Object, Object> e : perOwner.entrySet()) {
-                result.computeIfAbsent(e.getKey(), k -> new HashMap<>()).put(cp.dtoField(), e.getValue());
-            }
-        }
-        return result;
+        CollectionGraphAssembler assembler = new CollectionGraphAssembler(plan,
+                (cp, element, owner, ids) -> fetchChunk(cp, element, owner, ids, budget),
+                dtoMapperHelper::instantiate,
+                batchSize, maxDepth, maxElements);
+        return assembler.load(ownerEntity, ownerIds);
     }
 
     /** DTO-field overrides for one owner, with empty containers for collections it has none of. */
@@ -124,30 +157,15 @@ public class CollectionProjectionLoader {
 
     // ------------------------------------------------------------------ querying
 
-    private Map<Object, Object> fetch(CollectionPlan plan, Class<?> ownerEntity,
-                                      Collection<?> ownerIds, RowBudget budget) {
-        if (ownerIds.isEmpty()) {
-            return Map.of();
-        }
+    /**
+     * Runs one batched query for {@code plan} over a chunk of owners and returns its rows grouped
+     * by owner id, in query order. Does not recurse: nested collections are scheduled by
+     * {@link CollectionGraphAssembler}.
+     */
+    private CollectionGraphAssembler.FetchedLevel fetchChunk(CollectionPlan plan, DtoElement element,
+                                                             Class<?> ownerEntity, List<Object> ownerIds,
+                                                             RowBudget budget) {
         String ownerIdAttr = requireIdAttribute(ownerEntity);
-        List<Object> distinctIds = new ArrayList<>(new LinkedHashSet<>(ownerIds));
-
-        Map<Object, List<Object>> collected = new LinkedHashMap<>();
-        for (int from = 0; from < distinctIds.size(); from += batchSize) {
-            List<Object> chunk = distinctIds.subList(from, Math.min(from + batchSize, distinctIds.size()));
-            fetchChunk(plan, ownerEntity, ownerIdAttr, chunk, budget, collected);
-        }
-
-        Map<Object, Object> result = new LinkedHashMap<>();
-        for (Map.Entry<Object, List<Object>> e : collected.entrySet()) {
-            result.put(e.getKey(), toContainer(plan.container(), e.getValue()));
-        }
-        return result;
-    }
-
-    private void fetchChunk(CollectionPlan plan, Class<?> ownerEntity, String ownerIdAttr,
-                            List<Object> ownerIds, RowBudget budget,
-                            Map<Object, List<Object>> out) {
         CriteriaBuilder cb = em.getCriteriaBuilder();
         CriteriaQuery<Tuple> cq = cb.createTupleQuery();
         Root<?> root = cq.from(ownerEntity);
@@ -159,22 +177,25 @@ public class CollectionProjectionLoader {
         selections.add(ownerIdPath);
         orders.add(cb.asc(ownerIdPath));
 
+        Map<Object, List<CollectionGraphAssembler.ElementRow>> out = new LinkedHashMap<>();
+
         // ---- simple values -------------------------------------------------------------
-        if (plan.element() instanceof ScalarElement scalar) {
+        if (element == null) {
+            ScalarElement scalar = (ScalarElement) plan.element();
             Expression<?> value = resolveLeaf(pathCtx, root, plan.path());
             selections.add(value);
             orders.add(cb.asc(value));
             for (Tuple row : execute(cq, root, ownerIdPath, ownerIds, selections, orders, budget, plan, null)) {
                 Object converted = coerce(row.get(1), scalar.type(), plan.dtoField());
                 if (converted != null) {
-                    out.computeIfAbsent(row.get(0), k -> new ArrayList<>()).add(converted);
+                    out.computeIfAbsent(row.get(0), k -> new ArrayList<>())
+                            .add(CollectionGraphAssembler.ElementRow.scalar(converted));
                 }
             }
-            return;
+            return new CollectionGraphAssembler.FetchedLevel(null, out);
         }
 
         // ---- DTO elements --------------------------------------------------------------
-        DtoElement element = (DtoElement) plan.element();
         From<?, ?> el = pathCtx.resolveFrom(root, plan.path(), JoinType.INNER);
         requireCollectionAttribute(pathCtx, root, plan);
 
@@ -212,21 +233,7 @@ public class CollectionProjectionLoader {
             activePredicate = cb.or(cb.isNull(disableDate), cb.greaterThan(disableDate, LocalDateTime.now()));
         }
 
-        List<Tuple> rows = execute(cq, root, ownerIdPath, ownerIds, selections, orders, budget, plan, activePredicate);
-
-        // Nested collections: one batched fetch per nested collection for all elements of this chunk.
-        List<Map<Object, Object>> nestedResults = new ArrayList<>(element.nested().size());
-        if (!element.nested().isEmpty()) {
-            Set<Object> elementIds = new LinkedHashSet<>();
-            for (Tuple row : rows) {
-                elementIds.add(row.get(idColumn));
-            }
-            for (CollectionPlan nested : element.nested()) {
-                nestedResults.add(fetch(nested, elementType, elementIds, budget));
-            }
-        }
-
-        for (Tuple row : rows) {
+        for (Tuple row : execute(cq, root, ownerIdPath, ownerIds, selections, orders, budget, plan, activePredicate)) {
             Map<String, Object> values = new HashMap<>();
             for (int i = 0; i < element.scalars().size(); i++) {
                 ScalarField sf = element.scalars().get(i);
@@ -234,14 +241,10 @@ public class CollectionProjectionLoader {
                         plan.dtoField() + "." + sf.dtoField()));
             }
             Object elementId = idColumn >= 0 ? row.get(idColumn) : null;
-            for (int i = 0; i < element.nested().size(); i++) {
-                CollectionPlan nested = element.nested().get(i);
-                values.put(nested.dtoField(),
-                        nestedResults.get(i).getOrDefault(elementId, emptyContainer(nested.container())));
-            }
             out.computeIfAbsent(row.get(0), k -> new ArrayList<>())
-                    .add(dtoMapperHelper.instantiate(element.dtoClass(), values));
+                    .add(CollectionGraphAssembler.ElementRow.dto(elementId, values));
         }
+        return new CollectionGraphAssembler.FetchedLevel(elementIdAttr.isPresent() ? elementType : null, out);
     }
 
     private List<Tuple> execute(CriteriaQuery<Tuple> cq, Root<?> root, Path<Object> ownerIdPath,
@@ -357,13 +360,7 @@ public class CollectionProjectionLoader {
     }
 
     public Object emptyContainer(ContainerKind kind) {
-        return kind == ContainerKind.SET ? Set.of() : List.of();
-    }
-
-    private static Object toContainer(ContainerKind kind, List<Object> values) {
-        return kind == ContainerKind.SET
-                ? Collections.unmodifiableSet(new LinkedHashSet<>(values))
-                : List.copyOf(values);
+        return CollectionGraphAssembler.emptyContainer(kind);
     }
 
     /** Per-request, thread-confined counter of child rows read. */

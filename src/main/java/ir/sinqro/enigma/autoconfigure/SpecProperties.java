@@ -25,6 +25,16 @@ public class SpecProperties {
         private int collectionBatchSize = 500;
         /** Max child rows read for @ProjectedCollection fields per request; exceeding it fails the request. */
         private int maxCollectionRows = 10_000;
+        /**
+         * Max nested @ProjectedCollection levels that may hold elements (top-level collection = 1).
+         * Bounds the depth of self-referencing DTOs (trees); deeper data fails the request.
+         */
+        private int maxCollectionDepth = 32;
+        /**
+         * Max element DTOs produced for @ProjectedCollection fields per request (an element reached
+         * through several paths counts each time); exceeding it fails the request.
+         */
+        private int maxCollectionElements = 50_000;
 
         public int getMaxFilterDepth() { return maxFilterDepth; }
         public void setMaxFilterDepth(int maxFilterDepth) { this.maxFilterDepth = maxFilterDepth; }
@@ -43,6 +53,12 @@ public class SpecProperties {
 
         public int getMaxCollectionRows() { return maxCollectionRows; }
         public void setMaxCollectionRows(int maxCollectionRows) { this.maxCollectionRows = maxCollectionRows; }
+
+        public int getMaxCollectionDepth() { return maxCollectionDepth; }
+        public void setMaxCollectionDepth(int maxCollectionDepth) { this.maxCollectionDepth = maxCollectionDepth; }
+
+        public int getMaxCollectionElements() { return maxCollectionElements; }
+        public void setMaxCollectionElements(int maxCollectionElements) { this.maxCollectionElements = maxCollectionElements; }
 
         public int getMaxInSize() { return maxInSize; }
         public void setMaxInSize(int maxInSize) { this.maxInSize = maxInSize; }

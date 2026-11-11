@@ -50,11 +50,23 @@ class CollectionProjectionPlannerTest {
     }
 
     @Test
-    void rejectsUnsupportedContainerAndCycles() {
+    void rejectsUnsupportedContainer() {
         class BadContainer { @ProjectedCollection HashSet<String> x; }
-        class Cycle { @ProjectedCollection Set<Cycle> self; }
         assertThatThrownBy(() -> planner.planFor(BadContainer.class)).isInstanceOf(QueryRuleException.class);
-        assertThatThrownBy(() -> planner.planFor(Cycle.class)).isInstanceOf(QueryRuleException.class);
+    }
+
+    @Test
+    void plansSelfReferenceAsRecursiveElementInsteadOfFailing() {
+        class Cycle { Long id; @ProjectedCollection Set<Cycle> self; }
+        CollectionProjectionPlan plan = planner.planFor(Cycle.class);
+        CollectionPlan self = plan.collections().get(0);
+        assertThat(self.element()).isEqualTo(new RecursiveElement(Cycle.class));
+        assertThat(plan.dtoElementOf(self).nested()).singleElement().isSameAs(self);
+    }
+
+    @Test
+    void nonRecursivePlansHaveNoDefinitions() {
+        assertThat(planner.planFor(UserDto.class).isRecursive()).isFalse();
     }
 
     @Test

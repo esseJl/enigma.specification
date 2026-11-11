@@ -14,7 +14,11 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 /**
- * Reflection-only (no JPA) analysis of a DTO class. Thread-safe: the cache holds immutable
+ * Reflection-only (no JPA) analysis of a DTO class. Self-referencing and mutually recursive
+ * element DTOs are supported: a back-reference to an enclosing element type (or to the root DTO)
+ * is planned as a {@link RecursiveElement}; how deep the data is actually expanded is decided at
+ * load time (see {@link CollectionProjectionLoader}).
+ * <p> Thread-safe: the cache holds immutable
  * plans, built without holding any lock and published via {@code putIfAbsent}, so two threads
  * racing on the first call simply build equal plans and one wins. Invalid DTOs are never
  * cached and fail on every call with the same descriptive error.
@@ -37,65 +41,136 @@ public class CollectionProjectionPlanner {
     }
 
     private CollectionProjectionPlan build(Class<?> dtoClass) {
-        List<CollectionPlan> plans = new ArrayList<>();
-        for (Field f : fieldsOf(dtoClass)) {
-            if (f.isAnnotationPresent(ProjectedCollection.class)) {
-                plans.add(planCollection(f, Set.of(dtoClass), 1));
-            }
-        }
-        return plans.isEmpty() ? CollectionProjectionPlan.empty() : new CollectionProjectionPlan(plans);
+        return new Build(dtoClass).run();
     }
 
-    private CollectionPlan planCollection(Field f, Set<Class<?>> visited, int depth) {
-        String where = f.getDeclaringClass().getSimpleName() + "." + f.getName();
-        if (depth > MAX_DEPTH) {
-            throw new QueryRuleException("@ProjectedCollection nesting is too deep at " + where
-                    + " (max " + MAX_DEPTH + ")");
-        }
-        ContainerKind kind = containerKind(f, where);
-        Class<?> elementType = elementType(f, where);
-        ProjectedCollection ann = f.getAnnotation(ProjectedCollection.class);
-        String path = pathOf(f);
+    /**
+     * State of one (thread-confined) planning run.
+     * <ul>
+     *   <li>{@code inProgress}: element DTO types on the current planning stack (the root DTO is
+     *       always first). A collection whose element type is on this stack is a back-reference
+     *       and becomes a {@link RecursiveElement} instead of being expanded again, so planning
+     *       always terminates.</li>
+     *   <li>{@code done}: element DTO types fully planned in this run; reused so every occurrence
+     *       of a type shares one {@link DtoElement} (and one set of {@link CollectionPlan}
+     *       instances, which the loader uses as identity keys).</li>
+     * </ul>
+     */
+    private static final class Build {
+        private final Class<?> rootClass;
+        private final Set<Class<?>> inProgress = new LinkedHashSet<>();
+        private final Map<Class<?>, DtoElement> done = new LinkedHashMap<>();
+        private final Set<Class<?>> referenced = new LinkedHashSet<>();
 
-        if (isSimple(elementType)) {
-            if (!ann.orderBy().isBlank()) {
-                throw new QueryRuleException("orderBy is not supported for simple element type at " + where);
+        Build(Class<?> rootClass) {
+            this.rootClass = rootClass;
+        }
+
+        CollectionProjectionPlan run() {
+            inProgress.add(rootClass);
+            List<CollectionPlan> plans = new ArrayList<>();
+            List<ScalarField> rootScalars = new ArrayList<>();
+            String unsupportedRootField = null;
+            for (Field f : fieldsOf(rootClass)) {
+                if (f.isAnnotationPresent(ProjectedCollection.class)) {
+                    plans.add(planCollection(f, 1));
+                } else if (isCollectionLike(f.getType())) {
+                    continue;
+                } else if (isSimple(f.getType())) {
+                    rootScalars.add(new ScalarField(f.getName(), pathOf(f), f.getType()));
+                } else if (unsupportedRootField == null) {
+                    // fine for the flat root projection; only a problem if the root is also an element
+                    unsupportedRootField = f.getName();
+                }
             }
-            if (!ann.activeField().isBlank()) {
-                throw new QueryRuleException("activeField is not supported for simple element type at " + where);
+            inProgress.remove(rootClass);
+            if (plans.isEmpty()) {
+                return CollectionProjectionPlan.empty();
             }
-            return new CollectionPlan(f.getName(), path, kind, "", "", new ScalarElement(elementType));
+
+            Map<Class<?>, DtoElement> definitions = new LinkedHashMap<>();
+            for (Class<?> target : referenced) {
+                if (target == rootClass) {
+                    if (unsupportedRootField != null) {
+                        throw new QueryRuleException("Self-referencing DTO " + rootClass.getSimpleName()
+                                + " is used as a collection element, so it may only contain simple fields and"
+                                + " @ProjectedCollection fields; field '" + unsupportedRootField
+                                + "' is a nested object.");
+                    }
+                    // Same CollectionPlan instances as the top level: the loader keys on them.
+                    definitions.put(rootClass, new DtoElement(rootClass, rootScalars, plans));
+                } else {
+                    DtoElement def = done.get(target);
+                    if (def == null) {
+                        throw new IllegalStateException("Recursive element " + target.getName() + " was never defined");
+                    }
+                    definitions.put(target, def);
+                }
+            }
+            return new CollectionProjectionPlan(plans, definitions);
         }
 
-        if (visited.contains(elementType)) {
-            throw new QueryRuleException("Cyclic @ProjectedCollection through " + elementType.getSimpleName()
-                    + " at " + where);
-        }
-        Set<Class<?>> nextVisited = new HashSet<>(visited);
-        nextVisited.add(elementType);
+        private CollectionPlan planCollection(Field f, int depth) {
+            String where = f.getDeclaringClass().getSimpleName() + "." + f.getName();
+            ContainerKind kind = containerKind(f, where);
+            Class<?> elementType = elementType(f, where);
+            ProjectedCollection ann = f.getAnnotation(ProjectedCollection.class);
+            String path = pathOf(f);
 
-        List<ScalarField> scalars = new ArrayList<>();
-        List<CollectionPlan> nested = new ArrayList<>();
-        for (Field ef : fieldsOf(elementType)) {
-            if (ef.isAnnotationPresent(ProjectedCollection.class)) {
-                nested.add(planCollection(ef, nextVisited, depth + 1));
-            } else if (isCollectionLike(ef.getType())) {
-                // not opted in: left unset (null / DTO default), same as top-level behaviour
-                continue;
-            } else if (isSimple(ef.getType())) {
-                scalars.add(new ScalarField(ef.getName(), pathOf(ef), ef.getType()));
+            if (isSimple(elementType)) {
+                if (!ann.orderBy().isBlank()) {
+                    throw new QueryRuleException("orderBy is not supported for simple element type at " + where);
+                }
+                if (!ann.activeField().isBlank()) {
+                    throw new QueryRuleException("activeField is not supported for simple element type at " + where);
+                }
+                return new CollectionPlan(f.getName(), path, kind, "", "", new ScalarElement(elementType));
+            }
+
+            ElementPlan element;
+            if (inProgress.contains(elementType)) {
+                referenced.add(elementType);
+                element = new RecursiveElement(elementType);
+            } else if (done.containsKey(elementType)) {
+                element = done.get(elementType);
             } else {
-                throw new QueryRuleException("Unsupported nested object field '" + ef.getName() + "' in collection"
-                        + " element " + elementType.getSimpleName() + " (" + where + "). Collection element DTOs"
-                        + " may only contain simple fields and @ProjectedCollection fields.");
+                element = planElement(elementType, depth, where);
             }
+            return new CollectionPlan(f.getName(), path, kind, ann.orderBy().trim(),
+                    ann.activeField().trim(), element);
         }
-        if (scalars.isEmpty() && nested.isEmpty()) {
-            throw new QueryRuleException("Collection element " + elementType.getSimpleName()
-                    + " has no mappable fields (" + where + ")");
+
+        private DtoElement planElement(Class<?> elementType, int depth, String where) {
+            if (depth > MAX_DEPTH) {
+                throw new QueryRuleException("@ProjectedCollection nesting is too deep at " + where
+                        + " (max " + MAX_DEPTH + " distinct element types; self-references do not count)");
+            }
+            inProgress.add(elementType);
+            List<ScalarField> scalars = new ArrayList<>();
+            List<CollectionPlan> nested = new ArrayList<>();
+            for (Field ef : fieldsOf(elementType)) {
+                if (ef.isAnnotationPresent(ProjectedCollection.class)) {
+                    nested.add(planCollection(ef, depth + 1));
+                } else if (isCollectionLike(ef.getType())) {
+                    // not opted in: left unset (null / DTO default), same as top-level behaviour
+                    continue;
+                } else if (isSimple(ef.getType())) {
+                    scalars.add(new ScalarField(ef.getName(), pathOf(ef), ef.getType()));
+                } else {
+                    throw new QueryRuleException("Unsupported nested object field '" + ef.getName() + "' in collection"
+                            + " element " + elementType.getSimpleName() + " (" + where + "). Collection element DTOs"
+                            + " may only contain simple fields and @ProjectedCollection fields.");
+                }
+            }
+            inProgress.remove(elementType);
+            if (scalars.isEmpty() && nested.isEmpty()) {
+                throw new QueryRuleException("Collection element " + elementType.getSimpleName()
+                        + " has no mappable fields (" + where + ")");
+            }
+            DtoElement element = new DtoElement(elementType, scalars, nested);
+            done.put(elementType, element);
+            return element;
         }
-        return new CollectionPlan(f.getName(), path, kind, ann.orderBy().trim(),
-                ann.activeField().trim(), new DtoElement(elementType, scalars, nested));
     }
 
     private static String pathOf(Field f) {

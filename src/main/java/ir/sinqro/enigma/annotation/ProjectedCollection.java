@@ -15,6 +15,21 @@ import java.lang.annotation.*;
  * Collections are loaded with one batched query per collection per page (never per row), inside
  * the caller's read transaction, and are bounded by
  * {@code app.specification.spec.max-collection-rows}.
+ * <p>
+ * <b>Recursive DTOs.</b> The element type may be the declaring DTO itself or any enclosing
+ * element DTO, e.g. a category tree:
+ * <pre>{@code
+ * @DtoMapper(ProductCategory.class)
+ * record CategoryResponse(Long id, String name, @Mapper("parent.id") Long parentId,
+ *         @ProjectedCollection(orderBy = "name") @Mapper("children") List<CategoryResponse> children) {}
+ * }</pre>
+ * Such collections are loaded level by level (one batched query per tree level), each
+ * (collection, owner) at most once per request. A DTO used recursively as an element may only
+ * contain simple fields and {@code @ProjectedCollection} fields. If the data itself is cyclic
+ * (e.g. a node that is its own ancestor) the element is still returned but the repeated
+ * collection is left empty instead of being expanded again. Depth and output size are bounded by
+ * {@code max-collection-depth} (default 32) and {@code max-collection-elements} (default 50000);
+ * exceeding either fails the request.
  */
 @Documented
 @Target(ElementType.FIELD)
