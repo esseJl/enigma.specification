@@ -12,6 +12,7 @@ import jakarta.persistence.metamodel.Metamodel;
 import jakarta.persistence.metamodel.PluralAttribute;
 import jakarta.persistence.metamodel.SingularAttribute;
 import jakarta.persistence.metamodel.Type;
+import org.springframework.util.ClassUtils;
 
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
@@ -98,8 +99,10 @@ public class HierarchyGroupingSupport {
             throw invalid(grouping, "label '" + grouping.label() + "' must be a String attribute of "
                     + nodeClass.getSimpleName());
         }
+        // wrapper type (never a primitive): the id sub-queries are compared with id paths by Hibernate's type check
+        Class<?> nodeIdType = ClassUtils.resolvePrimitiveIfNecessary(nodeType.getIdType().getJavaType());
         return new ResolvedHierarchy(ownerClass, ownerId, path, nodeClass, nodeId,
-                nodeType.getIdType().getJavaType(), grouping.parent(), grouping.label());
+                nodeIdType, grouping.parent(), grouping.label());
     }
 
     private static EntityType<?> entity(Metamodel metamodel, Class<?> type, HierarchyGrouping grouping) {

@@ -28,6 +28,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.ClassUtils;
 
 import java.util.*;
 import java.util.stream.Collectors;
@@ -421,7 +422,11 @@ public abstract class QueryService<T, ID, D> {
         Specification<T> finalSpec = andSpecs(clientSpec, internalSpec);
 
         String idAttr = collectionLoader.requireIdAttribute(entityClass);
-        Subquery<Object> ids = cq.subquery(Object.class);
+        // Typed with the real id type: Hibernate 7 type-checks "id IN (subquery)" and rejects Long vs Object.
+        Class<?> idType = ClassUtils.resolvePrimitiveIfNecessary(
+                entityManager.getMetamodel().entity(entityClass).getIdType().getJavaType());
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        Subquery<Object> ids = (Subquery) cq.subquery(idType);
         Root<T> candidate = ids.from(entityClass);
         Predicate predicate = finalSpec.toPredicate(candidate, cq, cb);
         // The specifications mark the query distinct when they join a collection; the sub-query
