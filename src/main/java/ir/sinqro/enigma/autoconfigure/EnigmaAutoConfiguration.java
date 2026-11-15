@@ -69,6 +69,12 @@ public class EnigmaAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
+    public HierarchyGroupingSupport hierarchyGroupingSupport(EntityManager entityManager) {
+        return new HierarchyGroupingSupport(entityManager);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
     public SpecificationBuilder specificationBuilder(FieldMetaRegistry fieldMetaRegistry,
                                                      ValueConverter valueConverter,
                                                      PathResolver pathResolver,

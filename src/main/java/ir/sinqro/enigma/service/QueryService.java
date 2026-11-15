@@ -2,12 +2,17 @@ package ir.sinqro.enigma.service;
 
 import ir.sinqro.enigma.annotation.DtoMapper;
 import ir.sinqro.enigma.exception.QueryRuleException;
+import ir.sinqro.enigma.grouping.HierarchyGrouping;
+import ir.sinqro.enigma.grouping.HierarchyNode;
 import ir.sinqro.enigma.model.*;
 import ir.sinqro.enigma.repository.GenericRepository;
 import ir.sinqro.enigma.specification.CollectionProjectionLoader;
 import ir.sinqro.enigma.specification.CollectionProjectionPlan;
 import ir.sinqro.enigma.specification.CollectionProjectionPlanner;
 import ir.sinqro.enigma.specification.DtoMapperHelper;
+import ir.sinqro.enigma.specification.HierarchyGroupingQuery;
+import ir.sinqro.enigma.specification.HierarchyGroupingSupport;
+import ir.sinqro.enigma.specification.HierarchyPathFields;
 import ir.sinqro.enigma.specification.JoinContext;
 import ir.sinqro.enigma.specification.SpecificationBuilder;
 import ir.sinqro.enigma.utils.response.ResponseUtils;
@@ -42,6 +47,9 @@ public abstract class QueryService<T, ID, D> {
     private CollectionProjectionLoader collectionLoader;
     @Autowired(required = false)
     private ResponseUtils responseUtils;
+    /** Optional so that contexts wiring the library by hand keep working; created on first use. */
+    @Autowired(required = false)
+    private HierarchyGroupingSupport groupingSupport;
 
     private final GenericRepository<T, ID> repository;
     private final Class<D> dtoClass;
@@ -53,6 +61,19 @@ public abstract class QueryService<T, ID, D> {
 
     protected QueryRequest internalFilter() {
         return QueryRequest.of(null);
+    }
+
+    /**
+     * Hierarchy every page is grouped by (see {@link HierarchyGrouping}); {@code null} (default) =
+     * no grouping, i.e. exactly the behaviour of previous versions.
+     * <p>
+     * With a grouping, rows are ordered by the group path first, then by the client sort, the
+     * {@link #internalFilter() internal} sort and the entity id; filters are applied through an
+     * id sub-query, so filtering through to-many associations needs no {@code DISTINCT}. Sorting
+     * through a to-many association is rejected in this mode.
+     */
+    protected HierarchyGrouping grouping() {
+        return null;
     }
 
 
@@ -94,10 +115,13 @@ public abstract class QueryService<T, ID, D> {
                 Math.max(0, pageReq.page()), pageReq.size(), springSort);
 
         boolean isDtoProjection = dtoOrEntity.isAnnotationPresent(DtoMapper.class);
+        HierarchyGrouping grouping = grouping();
 
         Page<X> result;
         if (isDtoProjection) {
-            result = findProjected(safeRequest.filter(), internalRequest, pageable, dtoOrEntity);
+            result = findProjected(safeRequest.filter(), internalRequest, pageable, dtoOrEntity, grouping);
+        } else if (grouping != null) {
+            result = findEntitiesGrouped(safeRequest.filter(), internalRequest, pageable, dtoOrEntity, grouping);
         } else {
             Specification<T> finalSpec = getFinalSpec(dtoOrEntity, safeRequest, internalRequest);
 
@@ -208,7 +232,8 @@ public abstract class QueryService<T, ID, D> {
     }
 
     @SuppressWarnings("unchecked")
-    private <X> Page<X> findProjected(FilterNode clientFilter, QueryRequest internalRequest, Pageable pageable, Class<?> dtoClass) {
+    private <X> Page<X> findProjected(FilterNode clientFilter, QueryRequest internalRequest, Pageable pageable,
+                                      Class<?> dtoClass, HierarchyGrouping grouping) {
 
         Class<T> entityClass = (Class<T>) specBuilder.resolveEntityClass(dtoClass);
         CriteriaBuilder cb = entityManager.getCriteriaBuilder();
@@ -244,40 +269,57 @@ public abstract class QueryService<T, ID, D> {
         } else {
             ownerIdColumn = -1;
         }
+
+        // Grouping: the group path columns trail everything else; the mapper reads by index.
+        final HierarchyGroupingQuery groupingQuery = grouping == null
+                ? null
+                : groupingSupport().prepare(grouping, entityClass, cq, root, cb);
+        final int groupPathColumn = groupingQuery == null ? -1 : selections.size();
+        if (groupingQuery != null) {
+            selections.addAll(groupingQuery.selections());
+        }
         cq.multiselect(selections);
 
-        Specification<T> clientSpec = null;
-        if (clientFilter != null) {
-            QueryRequest clientOnly = new QueryRequest(
-                    clientFilter,
-                    List.of(),
-                    PageRequest.firstPage());
-            clientSpec = specBuilder.buildSpecificationWithJoin(clientOnly, dtoClass, joinCtx);
-        }
-
-        Specification<T> internalSpec = specBuilder.buildSpecificationWithJoin(
-                internalRequest, null, joinCtx);
-
-        Specification<T> finalSpec = andSpecs(clientSpec, internalSpec);
-
-        if (finalSpec != null) {
-            Predicate predicate = finalSpec.toPredicate(root, cq, cb);
-            if (predicate != null) {
-                cq.where(predicate);
+        if (groupingQuery != null) {
+            Predicate matching = matchingIds(cq, root, cb, clientFilter, internalRequest, dtoClass, entityClass);
+            if (matching != null) {
+                cq.where(matching);
             }
-        }
-
-        if (joinCtx.hasCollectionJoin()) {
-            cq.distinct(true);
-        }
-
-        if (pageable.getSort().isSorted()) {
-            List<Order> orders = new ArrayList<>();
-            for (Sort.Order order : pageable.getSort()) {
-                Path<?> path = specBuilder.resolvePathWithJoin(root, order.getProperty(), joinCtx);
-                orders.add(order.isAscending() ? cb.asc(path) : cb.desc(path));
+            cq.orderBy(groupedOrders(groupingQuery, pageable.getSort(), root, cb, joinCtx, entityClass));
+        } else {
+            Specification<T> clientSpec = null;
+            if (clientFilter != null) {
+                QueryRequest clientOnly = new QueryRequest(
+                        clientFilter,
+                        List.of(),
+                        PageRequest.firstPage());
+                clientSpec = specBuilder.buildSpecificationWithJoin(clientOnly, dtoClass, joinCtx);
             }
-            cq.orderBy(orders);
+
+            Specification<T> internalSpec = specBuilder.buildSpecificationWithJoin(
+                    internalRequest, null, joinCtx);
+
+            Specification<T> finalSpec = andSpecs(clientSpec, internalSpec);
+
+            if (finalSpec != null) {
+                Predicate predicate = finalSpec.toPredicate(root, cq, cb);
+                if (predicate != null) {
+                    cq.where(predicate);
+                }
+            }
+
+            if (joinCtx.hasCollectionJoin()) {
+                cq.distinct(true);
+            }
+
+            if (pageable.getSort().isSorted()) {
+                List<Order> orders = new ArrayList<>();
+                for (Sort.Order order : pageable.getSort()) {
+                    Path<?> path = specBuilder.resolvePathWithJoin(root, order.getProperty(), joinCtx);
+                    orders.add(order.isAscending() ? cb.asc(path) : cb.desc(path));
+                }
+                cq.orderBy(orders);
+            }
         }
 
         TypedQuery<Tuple> dataQuery = entityManager.createQuery(cq);
@@ -304,15 +346,121 @@ public abstract class QueryService<T, ID, D> {
             loadedCollections = collectionLoader.load(collectionPlan, entityClass, ownerIds);
         }
 
+        List<String> hierarchyPathFields = groupingQuery != null ? HierarchyPathFields.of(dtoClass) : List.of();
+
         List<X> content = new ArrayList<>(tuples.size());
         for (Tuple tuple : tuples) {
             Map<String, Object> overrides = ownerIdColumn >= 0
                     ? collectionLoader.valuesFor(collectionPlan, loadedCollections, tuple.get(ownerIdColumn))
                     : Map.of();
+            if (!hierarchyPathFields.isEmpty()) {
+                Map<String, Object> withPath = new HashMap<>(overrides);
+                List<HierarchyNode> path = groupingQuery.pathOf(tuple, groupPathColumn);
+                for (String field : hierarchyPathFields) {
+                    withPath.put(field, path);
+                }
+                overrides = withPath;
+            }
             content.add(dtoMapperHelper.mapTupleToDto(tuple, (Class<X>) dtoClass, metas, overrides));
         }
 
         return new PageImpl<>(content, pageable, total);
+    }
+
+    /**
+     * Grouped entity query: same ordering and filtering as the grouped projection, selecting the
+     * entity itself.
+     */
+    @SuppressWarnings("unchecked")
+    private <X> Page<X> findEntitiesGrouped(FilterNode clientFilter, QueryRequest internalRequest, Pageable pageable,
+                                            Class<X> dtoOrEntity, HierarchyGrouping grouping) {
+        Class<T> entityClass = (Class<T>) specBuilder.resolveEntityClass(dtoOrEntity);
+        CriteriaBuilder cb = entityManager.getCriteriaBuilder();
+        CriteriaQuery<T> cq = cb.createQuery(entityClass);
+        Root<T> root = cq.from(entityClass);
+        cq.select(root);
+
+        HierarchyGroupingQuery groupingQuery = groupingSupport().prepare(grouping, entityClass, cq, root, cb);
+        Predicate matching = matchingIds(cq, root, cb, clientFilter, internalRequest, dtoOrEntity, entityClass);
+        if (matching != null) {
+            cq.where(matching);
+        }
+        JoinContext sortCtx = new JoinContext(specBuilder.maxJoins());
+        cq.orderBy(groupedOrders(groupingQuery, pageable.getSort(), root, cb, sortCtx, entityClass));
+
+        TypedQuery<T> dataQuery = entityManager.createQuery(cq);
+        dataQuery.setFirstResult(safeOffset(pageable));
+        dataQuery.setMaxResults(pageable.getPageSize());
+        List<T> rows = dataQuery.getResultList();
+
+        long total = pageable.getOffset() == 0 && rows.size() < pageable.getPageSize()
+                ? rows.size()
+                : executeCount(clientFilter, internalRequest, entityClass, dtoOrEntity, false);
+        return new PageImpl<>((List<X>) rows, pageable, total);
+    }
+
+    /**
+     * {@code root.id IN (select c.id from T c where <client and internal filters on c>)}, or
+     * {@code null} when there is no filter. Keeping the filter joins inside the sub-query means the
+     * outer (grouped, ordered) query never multiplies rows and never needs {@code DISTINCT}, which
+     * databases reject together with ORDER BY expressions that are not selected.
+     */
+    private Predicate matchingIds(CriteriaQuery<?> cq, Root<T> root, CriteriaBuilder cb, FilterNode clientFilter,
+                                  QueryRequest internalRequest, Class<?> dtoOrEntity, Class<T> entityClass) {
+        if (clientFilter == null && internalRequest.filter() == null) {
+            return null;
+        }
+        // Own join context: joins must belong to the sub-query root, never to the outer one.
+        JoinContext filterCtx = new JoinContext(specBuilder.maxJoins());
+        Specification<T> clientSpec = null;
+        if (clientFilter != null) {
+            QueryRequest clientOnly = new QueryRequest(clientFilter, List.of(), PageRequest.firstPage());
+            clientSpec = specBuilder.buildSpecificationWithJoin(clientOnly, dtoOrEntity, filterCtx);
+        }
+        Specification<T> internalSpec = specBuilder.buildSpecificationWithJoin(internalRequest, null, filterCtx);
+        Specification<T> finalSpec = andSpecs(clientSpec, internalSpec);
+
+        String idAttr = collectionLoader.requireIdAttribute(entityClass);
+        Subquery<Object> ids = cq.subquery(Object.class);
+        Root<T> candidate = ids.from(entityClass);
+        Predicate predicate = finalSpec.toPredicate(candidate, cq, cb);
+        // The specifications mark the query distinct when they join a collection; the sub-query
+        // already makes the outer rows unique.
+        cq.distinct(false);
+        ids.select(candidate.get(idAttr));
+        if (predicate != null) {
+            ids.where(predicate);
+        }
+        return root.get(idAttr).in(ids);
+    }
+
+    /** Group orders, then the (already merged) client/internal sort, then the id as final tie-breaker. */
+    private List<Order> groupedOrders(HierarchyGroupingQuery groupingQuery, Sort sort, Root<T> root,
+                                      CriteriaBuilder cb, JoinContext joinCtx, Class<T> entityClass) {
+        List<Order> orders = new ArrayList<>(groupingQuery.orders());
+        String idAttr = collectionLoader.requireIdAttribute(entityClass);
+        boolean sortedById = false;
+        for (Sort.Order order : sort) {
+            Path<?> path = specBuilder.resolvePathWithJoin(root, order.getProperty(), joinCtx);
+            orders.add(order.isAscending() ? cb.asc(path) : cb.desc(path));
+            sortedById |= idAttr.equals(order.getProperty());
+        }
+        if (joinCtx.hasCollectionJoin()) {
+            throw new QueryRuleException("Sorting by a to-many field cannot be combined with hierarchy grouping");
+        }
+        if (!sortedById) {
+            orders.add(cb.asc(root.get(idAttr)));
+        }
+        return orders;
+    }
+
+    private HierarchyGroupingSupport groupingSupport() {
+        HierarchyGroupingSupport support = groupingSupport;
+        if (support == null) {
+            support = new HierarchyGroupingSupport(entityManager);
+            groupingSupport = support;
+        }
+        return support;
     }
 
     private static int safeOffset(Pageable pageable) {

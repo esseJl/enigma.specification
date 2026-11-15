@@ -3,6 +3,7 @@ package ir.sinqro.enigma.specification;
 
 import ir.sinqro.enigma.annotation.DisableSpecificationQuery;
 import ir.sinqro.enigma.annotation.DtoMapper;
+import ir.sinqro.enigma.annotation.HierarchyPath;
 import ir.sinqro.enigma.annotation.Mapper;
 import ir.sinqro.enigma.model.FieldMeta;
 
@@ -162,6 +163,14 @@ public class FieldMetaRegistry {
             }
 
             String dtoName = prefix.isEmpty() ? f.getName() : prefix + "." + f.getName();
+
+            if (f.isAnnotationPresent(HierarchyPath.class)) {
+                // Computed by the grouping query, not an entity path: never projected (marked as
+                // "through collection"), never filterable or sortable (disabled).
+                canonical.put(dtoName, new FieldMeta(dtoName, dtoName, true,
+                        "computed hierarchy path of the grouping", true));
+                continue;
+            }
 
             Mapper mapper = f.getAnnotation(Mapper.class);
             boolean hasMapper = mapper != null && mapper.value() != null && !mapper.value().isBlank();
